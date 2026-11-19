@@ -1,0 +1,59 @@
+services:
+  db:
+    image: postgres:17
+    environment:
+      POSTGRES_DB: ielts
+      POSTGRES_USER: ielts
+      POSTGRES_PASSWORD: ielts
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ielts -d ielts"]
+      interval: 3s
+      timeout: 3s
+      retries: 15
+  migrate:
+    build: .
+    command: ["alembic", "upgrade", "head"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://ielts:ielts@db/ielts
+    depends_on:
+      db:
+        condition: service_healthy
+  api:
+    build: .
+    command: ["uvicorn", "backend.api:app", "--host", "0.0.0.0"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://ielts:ielts@db/ielts
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-}
+      LLM_API_STYLE: ${LLM_API_STYLE:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  worker:
+    build: .
+    command: ["python", "-m", "backend.worker"]
+    environment:
+      DATABASE_URL: postgresql+psycopg://ielts:ielts@db/ielts
+      LLM_BASE_URL: ${LLM_BASE_URL:-}
+      LLM_API_KEY: ${LLM_API_KEY:-}
+      LLM_MODEL: ${LLM_MODEL:-}
+      LLM_REASONING_EFFORT: ${LLM_REASONING_EFFORT:-}
+      LLM_API_STYLE: ${LLM_API_STYLE:-}
+      WIKIPEDIA_USER_AGENT: ${WIKIPEDIA_USER_AGENT:-}
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+  frontend:
+    build: ./frontend
+    environment:
+      API_ORIGIN: http://api:8000
+    ports:
+      - "127.0.0.1:5173:5173"
+    depends_on:
+      - api
+volumes:
+  postgres_data:
