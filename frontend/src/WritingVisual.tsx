@@ -1,6 +1,11 @@
 import { useEffect, useMemo, useRef } from "react";
 import { Box, Card, CardContent, Stack, Typography } from "@mui/material";
 import { useTheme } from "@mui/material/styles";
+import { ArcElement, BarController, BarElement, CategoryScale, Chart, LineController, LineElement,
+  LinearScale, PieController, PointElement, Tooltip } from "chart.js";
+
+Chart.register(BarController, LineController, PieController, BarElement, LineElement, PointElement,
+  ArcElement, CategoryScale, LinearScale, Tooltip);
 
 export type WritingChart = {
   title: string;
@@ -10,7 +15,7 @@ export type WritingChart = {
   unit?: "%" | "count";
 };
 
-export type WritingVisualKind = "bar" | "line" | "pie" | "table" | "bar_table" | "process";
+export type WritingVisualKind = "bar" | "line" | "pie" | "table" | "bar_table" | "bar_line" | "process";
 
 function chartMaximum(chart: WritingChart) {
   if (chart.unit !== "count") return 100;
@@ -44,102 +49,77 @@ function Swatch({ color }: { color: string }) {
     sx={{ display: "inline-block", width: 10, height: 10, bgcolor: color, borderRadius: 0.25, mr: 0.75 }} />;
 }
 
-function SeriesGraph({ chart, colors, groupedBars }: { chart: WritingChart; colors: string[]; groupedBars: boolean }) {
+function NumericChart({ chart, colors, kind, column }: {
+  chart: WritingChart; colors: string[]; kind: "bar" | "line" | "pie"; column?: number;
+}) {
   const canvas = useRef<HTMLCanvasElement>(null);
   const theme = useTheme();
-  const { divider, text } = theme.palette;
 
   useEffect(() => {
     const node = canvas.current;
-    const ctx = node?.getContext("2d");
-    if (!node || !ctx) return;
+    if (!node) return;
+    const { divider, text, background } = theme.palette;
+    const isPie = kind === "pie";
+    const datasets = isPie ? [{
+      label: column === undefined ? chart.title : chart.years[column],
+      data: chart.series.map(series => series.values[column ?? 0]),
+      backgroundColor: colors,
+      borderColor: background.paper,
+      borderWidth: 1.5,
+    }] : chart.series.map((series, index) => ({
+      label: series.label,
+      data: series.values,
+      backgroundColor: colors[index],
+      borderColor: colors[index],
+      borderDash: [[], [6, 3], [2, 3], [8, 3, 2, 3]][index] ?? [],
+      borderWidth: 2,
+      tension: 0,
+    }));
+    const instance = new Chart(node, {
+      type: kind,
+      data: { labels: isPie ? chart.series.map(series => series.label) : chart.years, datasets },
+      options: {
+        animation: false,
+        responsive: true,
+        maintainAspectRatio: false,
+        color: text.primary,
+        scales: isPie ? undefined : {
+          x: { grid: { color: divider }, ticks: { color: text.secondary } },
+          y: {
+            beginAtZero: true, max: chartMaximum(chart),
+            grid: { color: divider },
+            title: { display: true, text: chart.unit === "count" ? "Count" : "Percentage", color: text.secondary },
+            ticks: { color: text.secondary, callback: value => chart.unit === "count"
+              ? Number(value).toLocaleString(undefined, { notation: "compact" }) : formatValue(chart, Number(value)) },
+          },
+        },
+        plugins: {
+          tooltip: {
+            callbacks: {
+              label: context => {
+                const label = isPie ? context.label : context.dataset.label;
+                return (label ? label + ": " : "") + formatValue(chart, Number(context.raw));
+              },
+            },
+          },
+        },
+      },
+    });
+    return () => instance.destroy();
+  }, [chart, colors, kind, column, theme]);
 
-    function draw() {
-      if (!node || !ctx) return;
-      const width = node.clientWidth;
-      const height = node.clientHeight;
-      if (!width || !height) return;
-      const pixelRatio = window.devicePixelRatio || 1;
-      node.width = width * pixelRatio;
-      node.height = height * pixelRatio;
-      ctx.scale(pixelRatio, pixelRatio);
-      const left = chart.unit === "count" ? 52 : 40;
-      const right = width - 24;
-      const top = 16;
-      const bottom = height - 30;
-      const groupWidth = (right - left) / chart.years.length;
-      const x = (index: number) => groupedBars ? left + (index + 0.5) * groupWidth :
-        left + index * (right - left) / Math.max(1, chart.years.length - 1);
-      const maximum = chartMaximum(chart);
-      const y = (value: number) => bottom - (bottom - top) * value / maximum;
-      ctx.font = "11px system-ui";
-      ctx.fillStyle = text.secondary;
-      ctx.strokeStyle = divider;
-      ctx.textAlign = "right";
-      ctx.textBaseline = "middle";
-      for (let fraction = 0; fraction <= 5; fraction++) {
-        const tick = maximum / 5 * fraction;
-        ctx.beginPath();
-        ctx.moveTo(left, y(tick));
-        ctx.lineTo(right, y(tick));
-        ctx.stroke();
-        const label = chart.unit === "count" ? tick.toLocaleString(undefined, { notation: "compact" }) : formatValue(chart, tick);
-        ctx.fillText(label, left - 5, y(tick));
-      }
-      ctx.textBaseline = "top";
-      ctx.textAlign = "center";
-      chart.years.forEach((year, index) => ctx.fillText(year, x(index), bottom + 8));
-      chart.series.forEach((series, index) => {
-        ctx.fillStyle = colors[index];
-        if (groupedBars) {
-          const barWidth = Math.min(28, groupWidth * 0.8 / chart.series.length);
-          const offset = (index - chart.series.length / 2) * barWidth;
-          series.values.forEach((value, point) => {
-            const top = y(value);
-            ctx.fillRect(x(point) + offset, top, Math.max(1, barWidth - 1), bottom - top);
-          });
-          return;
-        }
-        ctx.strokeStyle = colors[index];
-        ctx.lineWidth = 2;
-        ctx.setLineDash([[], [6, 3], [2, 3], [8, 3, 2, 3]][index] ?? []);
-        ctx.beginPath();
-        series.values.forEach((value, point) => (point ? ctx.lineTo(x(point), y(value)) : ctx.moveTo(x(point), y(value))));
-        ctx.stroke();
-        series.values.forEach((value, point) => {
-          ctx.beginPath();
-          ctx.arc(x(point), y(value), 3, 0, Math.PI * 2);
-          ctx.fill();
-        });
-      });
-    }
-
-    draw();
-    const observer = new ResizeObserver(draw);
-    observer.observe(node);
-    return () => observer.disconnect();
-  }, [chart, colors, divider, groupedBars, text.secondary]);
-
-  return <Box component="canvas" ref={canvas} aria-hidden="true" sx={{ display: "block", width: "100%", height: 240 }} />;
+  return <Box sx={{ position: "relative", width: kind === "pie" ? { xs: 144, sm: 166 } : "100%",
+    height: kind === "pie" ? { xs: 144, sm: 166 } : 240, minWidth: 0 }}>
+    <canvas ref={canvas} aria-hidden="true" />
+  </Box>;
 }
 
 function PieCharts({ chart, colors }: { chart: WritingChart; colors: string[] }) {
   return <Stack direction="row" useFlexGap spacing={3} sx={{ flexWrap: "wrap", justifyContent: "center" }}>
-    {chart.years.map((year, index) => {
-      let end = 0;
-      const stops = chart.series.map((series, slice) => {
-        const start = end;
-        end += series.values[index];
-        return `${colors[slice]} ${start}% ${end}%`;
-      });
-      return <Stack spacing={1} key={year} sx={{ alignItems: "center" }}>
-        <Box aria-hidden="true" sx={{
-          width: { xs: 144, sm: 166 }, aspectRatio: "1", borderRadius: "50%",
-          background: `conic-gradient(${stops.join(", ")})`,
-        }} />
-        <Typography variant="body2" sx={{ fontWeight: 600 }}>{year}</Typography>
-      </Stack>;
-    })}
+    {chart.years.map((year, index) => <Stack spacing={1} key={year} sx={{ alignItems: "center" }}>
+      <NumericChart chart={chart} colors={colors} kind="pie" column={index} />
+      <Typography variant="body2" sx={{ fontWeight: 600 }}>{year}</Typography>
+    </Stack>)}
   </Stack>;
 }
 
@@ -155,7 +135,7 @@ export function TaskChart({ chart, kind = "bar" }: { chart: WritingChart; kind?:
       {chart.synthetic && <Typography variant="caption" color="text.secondary">Illustrative practice data</Typography>}
       <Stack spacing={1.5} sx={{ mt: 2 }}>
         {kind === "pie" ? <PieCharts chart={chart} colors={colors} /> :
-          <SeriesGraph chart={chart} colors={colors} groupedBars={kind !== "line"} />}
+          <NumericChart chart={chart} colors={colors} kind={kind === "line" ? "line" : "bar"} />}
         <WritingDataTable rows={rows} colors={colors} />
       </Stack>
     </CardContent>

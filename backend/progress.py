@@ -14,14 +14,28 @@ READING_BAND_THRESHOLDS = (
 )
 
 
-def reading_band_fields(result):
-    if not result or result.get("kind") != "reading_raw" or result.get("maximum") != 40:
+# IDP's Listening reference ranges stop at eleven correct answers.
+LISTENING_BAND_THRESHOLDS = (
+    (39, 9.0), (37, 8.5), (35, 8.0), (32, 7.5), (30, 7.0),
+    (26, 6.5), (23, 6.0), (18, 5.5), (16, 5.0), (13, 4.5), (11, 4.0),
+)
+PRACTICE_BAND_THRESHOLDS = {
+    "reading_raw": READING_BAND_THRESHOLDS,
+    "listening_self_scored": LISTENING_BAND_THRESHOLDS,
+}
+
+
+def practice_band_fields(result):
+    if not result or result.get("maximum") != 40:
+        return {}
+    thresholds = PRACTICE_BAND_THRESHOLDS.get(result.get("kind"))
+    if not thresholds:
         return {}
     score = result["score"]
-    for minimum, band in READING_BAND_THRESHOLDS:
+    for minimum, band in thresholds:
         if score >= minimum:
             return {"band": band, "band_estimated": True}
-    return {"band_upper_bound": READING_BAND_THRESHOLDS[-1][1], "band_estimated": True}
+    return {"band_upper_bound": thresholds[-1][1], "band_estimated": True}
 
 
 def round_band(value):
@@ -56,9 +70,9 @@ def dashboard_estimates(session, learner_id):
             scores = recent(module, kind, result["maximum"].as_integer() == 40)
             if scores:
                 raw_average = round(mean(score["score"] for score in scores), 1)
-                reading_bands = [reading_band_fields(score).get("band") for score in scores] if module == "reading" else []
-                if reading_bands and all(band is not None for band in reading_bands):
-                    bands[module] = mean(reading_bands)
+                practice_bands = [practice_band_fields(score).get("band") for score in scores]
+                if all(band is not None for band in practice_bands):
+                    bands[module] = mean(practice_bands)
                     estimates[module] = {"value": round_band(bands[module]), "unit": "band", "count": len(scores),
                                          "estimated": True, "raw_average": raw_average}
                 else:

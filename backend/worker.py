@@ -62,10 +62,12 @@ def process(job):
                     Job.result["chart"]["title"].as_string(), Job.result["tasks"][0]["chart"]["title"].as_string(),
                 ).is_not(None),
             ).order_by(Job.available_at.desc(), Job.id).limit(1))
-        previous_visual = None
-        if last_test:
-            previous_visual = last_test.get("tasks", [last_test])[0].get("visual_kind", "bar")
-        return generate_writing_test(**job.payload, recent_titles=titles, previous_visual=previous_visual)
+        previous_task = last_test.get("tasks", [last_test])[0] if last_test else {}
+        return generate_writing_test(
+            **job.payload, recent_titles=titles,
+            previous_visual=previous_task.get("visual_kind", "bar") if previous_task else None,
+            previous_theme=previous_task.get("generation_theme"),
+        )
     if job.kind == "writing_feedback":
         with Session() as session:
             attempt = session.get(PracticeSession, UUID(job.payload["attempt_id"]))

@@ -58,6 +58,7 @@ export function Listening({ onStart, starting }: { onStart: (videoId: string) =>
   const player = useRef<PlaylistPlayer | null>(null);
   const [ready, setReady] = useState(false);
   const [message, setMessage] = useState("");
+  const [theater, setTheater] = useState(false);
 
   useEffect(() => {
     if (!host.current) return;
@@ -120,11 +121,14 @@ export function Listening({ onStart, starting }: { onStart: (videoId: string) =>
         if (videoId) onStart(videoId);
         else setMessage("Select a video in the player before starting your timed session.");
       }}>Start 30-minute practice</Button>
+      <Button color="listening" variant="outlined" aria-pressed={theater}
+        onClick={() => setTheater(value => !value)}>Theater mode</Button>
     </Stack>
     {message && <Alert severity="info">{message}</Alert>}
-    <Card variant="outlined" sx={{ overflow: "hidden" }}>
+    <Card variant="outlined" data-listening-theater={theater ? "" : undefined} sx={{ overflow: "hidden" }}>
       <Box ref={host} sx={{
         aspectRatio: "16 / 9", minHeight: 200,
+        maxHeight: theater ? "calc(100dvh - var(--app-bar-height, 0px) - 24px)" : undefined,
         "& iframe": { display: "block", width: "100%", height: "100%", border: 0 },
       }} />
     </Card>

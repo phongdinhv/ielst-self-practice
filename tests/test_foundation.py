@@ -14,7 +14,24 @@ from backend import api, db, practice, practice_ai, reading_sources, worker
 from backend.models import Job
 from backend.practice_ai import ReadingQuestion, WikipediaBusy, canonical_choice
 from backend.practice_models import PracticeSession
-from backend.progress import reading_band_fields
+from backend.progress import practice_band_fields
+
+
+READING_ASSESSMENT = {
+    "targeted_skill": "Find evidence", "difficulty_estimate": "moderate",
+    "additional_evidence": [], "distractor_analysis": [],
+}
+
+
+def writing_reference():
+    return {
+        "key_features": ["Participation differs by group.", "Some groups rise over time."],
+        "important_comparisons": ["Compare the initial and final rankings."],
+        "accepted_numeric_interpretations": ["Use the displayed units consistently."],
+        "secondary_details": [], "common_errors": ["Avoid confusing counts and shares."],
+        "sample_response": "The visual presents data on participation across the groups. " * 20,
+        "difficulty_estimate": "moderate",
+    }
 
 
 def test_migration_dashboard_and_worker(tmp_path, monkeypatch):
@@ -57,7 +74,8 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
     for module in (api, practice, worker):
         monkeypatch.setattr(module, "Session", sessions)
     monkeypatch.setattr(db, "engine", engine)
-    question = {"type": "completion", "prompt": "Enter a word", "options": [], "word_limit": 1,
+    question = {"question_id": "passage-1-q1", "assessment": READING_ASSESSMENT,
+                "type": "completion", "prompt": "Enter a word", "options": [], "word_limit": 1,
                 "answers": ["sample"], "explanation": "The passage identifies the sample.", "evidence": "sample"}
     monkeypatch.setattr(worker, "generate_reading", lambda **_: {
         "title": "Mock", "passages": [
@@ -133,6 +151,8 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
         reading = client.post(f"{prefix}/reading/start", json={"reading_job_id": generation}).json()
         assert reading["content"]["reading_option_order"] == "shuffled-v1"
         assert "answers" not in reading["content"]["passages"][0]["questions"][0]
+        assert "assessment" not in reading["content"]["passages"][0]["questions"][0]
+        assert reading["content"]["passages"][0]["questions"][0]["question_id"] == "passage-1-q1"
         url = f"{prefix}/sessions/{reading['id']}"
         work = {"answers": {"1": " SAMPLE ", "2": "wrong"}}
         assert client.put(f"{url}/draft", json=work).json()["saved"]
@@ -261,17 +281,23 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
         group = listening["content"]["simulation_id"]
         reading_request = {"simulation_id": group, "reading_job_id": generation}
         assert client.post(f"{prefix}/reading/start", json=reading_request).status_code == 409
-        marks = {"correct": [True] + [False] * 39}
+        marks = {"correct": [True, False] + [True] * 25 + [False] * 13}
         assert client.post(f"{listening_url}/listening-score", json=marks).status_code == 409
         client.post(f"{listening_url}/resume")
         client.post(f"{listening_url}/submit", json=listening_work)
         assert client.post(f"{prefix}/reading/start", json=reading_request).status_code == 409
         assert client.post(f"{listening_url}/listening-score", json={"correct": [True]}).status_code == 422
         scored = client.post(f"{listening_url}/listening-score", json=marks).json()
-        assert (scored["result"]["score"], scored["result"]["maximum"]) == (1, 40)
+        assert (scored["result"]["score"], scored["result"]["maximum"]) == (26, 40)
         assert scored["result"]["items"][0]["status"] == "correct"
         assert scored["result"]["items"][1]["status"] == "incorrect"
-        assert client.get("/api/v1/dashboard").json()["estimates"]["modules"]["listening"]["value"] == 1
+        assert scored["result"]["band"] == 6.5 and scored["result"]["band_estimated"]
+        assert client.get(listening_url).json()["result"] == scored["result"]
+        listing = client.get(f"{prefix}/sessions").json()["items"]
+        listening_history = next(item for item in listing if item["id"] == listening["id"])
+        assert listening_history["band"] == 6.5 and listening_history["band_estimated"]
+        estimate = client.get("/api/v1/dashboard").json()["estimates"]["modules"]["listening"]
+        assert estimate == {"value": 6.5, "unit": "band", "count": 1, "estimated": True, "raw_average": 26.0}
         reading_section = client.post(f"{prefix}/reading/start", json=reading_request).json()
         assert client.post(f"{prefix}/reading/start", json=reading_request).json()["id"] == reading_section["id"]
         client.post(f"{prefix}/sessions/{reading_section['id']}/submit", json={})
@@ -279,6 +305,7 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
         assert writing_section["content"]["task"] == "full"
         sections = client.get(f"{prefix}/simulation/{group}").json()["items"]
         assert [item["module"] for item in sections] == ["listening", "reading", "writing"]
+        assert sections[0]["band"] == 6.5 and sections[0]["band_estimated"]
         assert client.delete(f"{prefix}/sessions/{writing_section['id']}").status_code == 204
         assert client.get(f"{prefix}/sessions/{writing_section['id']}").status_code == 404
         assert client.delete(listening_url).status_code == 204
@@ -333,6 +360,9 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
         }).status_code == 422
 
         def generate_prompt(instructions, material, output_model, **options):
+            if output_model is practice_ai.WritingReferenceDraft:
+                assert material["task"]["task"] == 1
+                return writing_reference()
             if output_model is practice_ai.WritingChartDraft:
                 assert material["category"] == "Education and learning"
                 return {
@@ -348,7 +378,7 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
                     "question": "Should governments set stricter limits on advertisements aimed at children?"}
 
         monkeypatch.setattr(practice_ai, "generate", generate_prompt)
-        assert set(practice_ai.WRITING_VISUAL_PLANS) == {"bar", "line", "pie", "table", "bar_table"}
+        assert set(practice_ai.WRITING_VISUAL_PLANS) == {"bar", "line", "pie", "table", "bar_table", "bar_line"}
         monkeypatch.setattr(practice_ai, "WRITING_VISUAL_PLANS", {"bar": ((3, 2),), "table": ((3, 2),)})
         monkeypatch.setattr(practice_ai, "choice", lambda choices: choices[0])
         generation_url = f"{prefix}/writing/generate"
@@ -372,8 +402,15 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
         assert content["mode"] == "learning"
         assert [task["category"] for task in content["tasks"]] == ["Education and learning", "Media and advertising"]
         assert content["tasks"][0]["chart"]["synthetic"] is True
+        assert "reference_analysis" not in content["tasks"][0]
+        assert "reference_analysis" not in client.get(f"{prefix}/sessions/{started['id']}").json()["content"]["tasks"][0]
         assert "2015 and 2025" in content["tasks"][0]["prompt"]
         assert "at least 250 words" in content["tasks"][1]["prompt"]
+        submitted_generated = client.post(f"{prefix}/sessions/{started['id']}/submit", json={}).json()
+        assert submitted_generated["content"]["tasks"][0]["reference_analysis"]["synthetic_data"] is True
+        assert worker.run_once()
+        retry = client.post(f"{prefix}/writing/start", json={"parent_id": started["id"]}).json()
+        assert "reference_analysis" not in retry["content"]["tasks"][0]
         next_job = client.post(generation_url, json={
             "task": 1, "categories": {"1": "Education and learning"},
         }).json()["job_id"]
@@ -403,6 +440,7 @@ def test_reading_and_writing_sessions(tmp_path, monkeypatch):
     ("pie", "%", ["2000", "2010", "2020"], [[25, 35, 50], [40, 40, 30], [35, 25, 20]], "pie charts"),
     ("table", "count", ["2000", "2005", "2010"], [[1500, 2500, 3600], [40, 50, 20], [35, 10, 60]], "table"),
     ("bar_table", "count", ["2000", "2010"], [[60, 20], [30, 40], [10, 140]], "bar chart"),
+    ("bar_line", "count", ["2000", "2010"], [[60, 20], [30, 40], [10, 140]], "bar chart"),
 ])
 def test_writing_task_one_visual_formats(monkeypatch, kind, unit, years, values, display):
     monkeypatch.setattr(practice_ai, "WRITING_VISUAL_PLANS", {kind: ((len(values), len(years)),)})
@@ -410,6 +448,9 @@ def test_writing_task_one_visual_formats(monkeypatch, kind, unit, years, values,
     requests = []
 
     def generate(instructions, material, output_model, **options):
+        if output_model is practice_ai.WritingReferenceDraft:
+            assert material["task"]["visual_kind"] == kind
+            return writing_reference()
         requests.append(material.get("revision_instruction"))
         series = [{"label": f"Group {number}", "values": row[:]} for number, row in enumerate(values)]
         if kind == "pie" and len(requests) == 1:
@@ -419,6 +460,8 @@ def test_writing_task_one_visual_formats(monkeypatch, kind, unit, years, values,
     monkeypatch.setattr(practice_ai, "generate", generate)
     task = practice_ai.generate_writing_prompt(1, "Education and learning", [])
     assert task["visual_kind"] == kind
+    assert task["reference_analysis"]["synthetic_data"] is True
+    assert task["minimum_words"] == 150
     assert f"The {display} below" in task["prompt"]
     if kind == "table":
         assert task["table"][0] == ["Group", *years]
@@ -435,6 +478,8 @@ def test_writing_task_one_visual_formats(monkeypatch, kind, unit, years, values,
             ["Group", "2000", "2010"], ["Group 0", "60.0%", "10.0%"], ["Group 1", "30.0%", "20.0%"],
             ["Group 2", "10.0%", "70.0%"],
         ]
+    if kind == "bar_line":
+        assert task["comparison_chart"]["series"][0]["values"] == [60, 10]
 
 
 def test_reading_stops_starting_model_calls_at_generation_deadline(monkeypatch):
@@ -448,6 +493,50 @@ def test_reading_stops_starting_model_calls_at_generation_deadline(monkeypatch):
     monkeypatch.setattr(practice_ai, "generate", unexpected_call)
     with pytest.raises(practice_ai.ReadingGenerationTimeout, match="exceeded 10 minutes"):
         practice_ai.generate_reading()
+
+
+def test_writing_feedback_keeps_topic_specific_examples(monkeypatch):
+    examples = [
+        {"type": "opening_paraphrase", "text": "Many towns are reconsidering the role of public libraries."},
+        {"type": "argument", "text": "Free library access helps residents study and apply for work."},
+        {"type": "qualification", "text": "These benefits depend on libraries being accessible outside working hours."},
+    ]
+    criterion = {"band": 6.5, "feedback": "Explain the benefit in more detail.", "quote": ""}
+
+    def evaluate(instructions, material, schema):
+        assert material["prompt"]["title"] == "Libraries"
+        return {**{key: criterion for key in ("task", "coherence", "vocabulary", "grammar")},
+                "revision_plan": {"plan": ["Clarify your position."], "develop": ["Explain one benefit."],
+                                  "check": ["Read the final paragraph."], "examples": examples}}
+
+    monkeypatch.setattr(practice_ai, "generate", evaluate)
+    feedback = practice_ai.assess_writing({"task": 2, "title": "Libraries"}, "Local libraries are useful.")
+    assert feedback["revision_plan"]["examples"] == examples
+    examples[1]["type"] = examples[0]["type"]
+    with pytest.raises(ValueError, match="distinct sentences and writing purposes"):
+        practice_ai.assess_writing({"task": 2, "title": "Libraries"}, "Local libraries are useful.")
+
+
+def test_reading_multiple_choice_requires_an_analysis_per_distractor(monkeypatch):
+    text = practice_ai.ReadingTextDraft(title="Transit", text="Few residents take the bus. " + "word " * 745)
+    trials = []
+
+    def generate(instructions, material, schema, **options):
+        trials.append(material.get("revision_instruction"))
+        assert "scope (some vs all)" in instructions
+        analyses = [{"option_text": option, "flaw": "The passage limits this claim to a small group."}
+                    for option in ("All residents", "No residents", "Most residents")]
+        return {"shared_options": [], "word_limit": None, "items": [{
+            "prompt": "How common is bus use?", "options": ["A. Few residents", "B. All residents", "C. No residents", "D. Most residents"],
+            "answers": ["A. Few residents"], "explanation": "The passage explicitly refers to a small group.",
+            "evidence": "Few residents take the bus.",
+            "assessment": {**READING_ASSESSMENT, "distractor_analysis": analyses if trials[-1] else analyses[:2]},
+        }]}
+
+    monkeypatch.setattr(practice_ai, "generate", generate)
+    question = practice_ai.generate_reading_group(2, text, "multiple_choice", 1)[0]
+    assert len(question.assessment.distractor_analysis) == 3
+    assert "flaw for each" in trials[1]
 
 
 def test_wikipedia_draw_filters_previously_used_sources(monkeypatch):
@@ -497,7 +586,17 @@ def test_reading_choices_shuffle_the_stored_answer_with_the_option(monkeypatch):
 @pytest.mark.parametrize(("raw", "expected"), [(40, 9.0), (39, 9.0), (38, 8.5), (30, 7.0), (29, 6.5), (4, 2.5)])
 def test_academic_reading_practice_band(raw, expected):
     result = {"kind": "reading_raw", "score": raw, "maximum": 40}
-    assert reading_band_fields(result) == {"band": expected, "band_estimated": True}
+    assert practice_band_fields(result) == {"band": expected, "band_estimated": True}
+
+
+@pytest.mark.parametrize(("raw", "band_field"), [
+    (40, {"band": 9.0}), (38, {"band": 8.5}), (32, {"band": 7.5}),
+    (11, {"band": 4.0}), (10, {"band_upper_bound": 4.0}), (0, {"band_upper_bound": 4.0}),
+])
+def test_listening_self_score_practice_band(raw, band_field):
+    result = {"kind": "listening_self_scored", "score": raw, "maximum": 40}
+    assert practice_band_fields(result) == {"band_estimated": True, **band_field}
+    assert practice_band_fields({**result, "maximum": 30}) == {}
 
 
 def test_every_publisher_has_fresh_reference_options(monkeypatch):
@@ -603,12 +702,13 @@ def test_reading_generation_splits_truncated_text_and_question_groups(monkeypatc
         return {"shared_options": [], "word_limit": None if verdict else 1, "items": [{
             "prompt": f"Claim {index}." if verdict else f"Item {index} contains ___.",
             "options": [], "answers": ["True" if verdict else "word"],
-            "evidence": "word", "explanation": "The passage identifies it.",
+            "evidence": "word", "explanation": "The passage identifies it.", "assessment": READING_ASSESSMENT,
         } for index in range(len(previous), len(previous) + count)]}
 
     monkeypatch.setattr(practice_ai, "generate", generate)
     passage = practice_ai.generate_reading_passage(0, {"title": "Source"})
     assert len(passage["questions"]) == 13
+    assert passage["questions"][0]["assessment"]["evidence_spans"] == [{"start": 0, "end": 4, "text": "word"}]
     assert [(group["start"], group["count"]) for group in passage["question_groups"]] == [(0, 7), (7, 6)]
     assert text_calls == [16384, 16384, 24576, 16384]
     assert group_calls == [(7, 0, 16384), (6, 0, 16384), (3, 0, 16384), (3, 3, 16384)]
@@ -656,14 +756,14 @@ def test_reading_matching_batches_keep_one_shared_bank(monkeypatch, invalid_evid
             return {"shared_options": options, "word_limit": None, "items": [{
                 "prompt": f"Paragraph {letter}", "options": [],
                 "answers": [answer], "evidence": "This quote was invented.",
-                "explanation": "The heading captures the main idea.",
+                "explanation": "The heading captures the main idea.", "assessment": READING_ASSESSMENT,
             } for letter, answer in zip("AB", options)]}
         second = bool(material["previous_items"])
         assert material["shared_options"] == (options if second else [])
         return {"shared_options": options, "word_limit": None, "items": [{
             "prompt": "Paragraph B" if second else "Paragraph A", "options": [],
             "answers": [options[int(second)]], "evidence": "Second fact." if second else "First fact.",
-            "explanation": "The heading captures the main idea.",
+            "explanation": "The heading captures the main idea.", "assessment": READING_ASSESSMENT,
         }]}
 
     monkeypatch.setattr(practice_ai, "generate", generate)

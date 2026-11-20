@@ -13,7 +13,7 @@ from backend.db import Session
 from backend.models import Job, Learner
 from backend.practice_ai import ModelBusy, ModelQuotaExhausted, normalize, suggest_vocabulary
 from backend.practice_models import PracticeSession
-from backend.progress import reading_band_fields
+from backend.progress import practice_band_fields
 from backend.reading_sources import PUBLISHER_FEEDS, PUBLISHERS, publisher_topic_ids
 from backend.reading_topics import MIXED_TOPICS, TOPIC_CATEGORIES, TOPIC_GROUPS, TOPICS
 from backend.writing_prompts import WRITING_CATEGORY_THEMES, WRITING_PROMPTS, uses_process_visual
@@ -93,17 +93,25 @@ def writing_series(session, attempt, *, lock=False):
 def serialize(attempt):
     content = attempt.content
     result = attempt.result
-    if attempt.module == "reading" and result is not None:
-        result = {**result, **reading_band_fields(result)}
+    if result is not None:
+        result = {**result, **practice_band_fields(result)}
     if attempt.module == "reading" and content["title"] == "Academic Reading mock":
         content = {**content, "title": MIXED_TOPICS}
     if attempt.module == "reading" and attempt.submitted_at is None:
         content = {**content, "passages": [
             {**passage, "questions": [
-                {key: question[key] for key in ("type", "prompt", "options", "word_limit")}
+                {key: question[key] for key in ("question_id", "type", "prompt", "options", "word_limit") if key in question}
                 for question in passage["questions"]
             ]} for passage in content["passages"]
         ]}
+    if attempt.module == "writing" and attempt.submitted_at is None:
+        if content.get("task") == "full":
+            content = {**content, "tasks": [
+                {key: value for key, value in task.items() if key != "reference_analysis"}
+                for task in content["tasks"]
+            ]}
+        else:
+            content = {key: value for key, value in content.items() if key != "reference_analysis"}
     return {
         "id": attempt.id, "module": attempt.module, "parent_id": attempt.parent_id, "content": content,
         "deadline": utc(attempt.deadline), "submitted_at": attempt.submitted_at,
@@ -401,7 +409,7 @@ def simulation_detail(simulation_id: UUID, learner_id: LearnerId):
         return {"items": [{
             "id": item.id, "module": item.module, "submitted": item.submitted_at is not None,
             "score": (item.result or {}).get("score"), "band": (item.result or {}).get("band"),
-            **reading_band_fields(item.result),
+            **practice_band_fields(item.result),
         } for module in SIMULATION_ORDER if (item := sections.get(module)) is not None and item.deleted_at is None]}
 
 
@@ -470,7 +478,7 @@ def history(learner_id: LearnerId):
             "deadline": utc(item.deadline),
             "score": (item.result or {}).get("score"), "maximum": (item.result or {}).get("maximum"),
             "band": (item.result or {}).get("band"),
-            **reading_band_fields(item.result),
+            **practice_band_fields(item.result),
         } for item in attempts]}
 
 
@@ -569,7 +577,7 @@ def writing_vocabulary(attempt_id: UUID, request: HintRequest, learner_id: Learn
         if (attempt.module != "writing" or attempt.content.get("mode") != "learning"
                 or attempt.submitted_at or attempt.paused_at or datetime.now(UTC) >= utc(attempt.deadline)):
             raise HTTPException(409, "Vocabulary hints are available during active Writing learning sessions")
-        content = attempt.content
+        content = serialize(attempt)["content"]
         if content["task"] == "full":
             content = content["tasks"][request.task - 1]
         if content["task"] != request.task:

@@ -178,6 +178,7 @@ function DashboardPage({ appearance, setAppearance }: {
       <Container component="main" maxWidth={view === "attempt" || focused ? "xl" : "md"}
         sx={{
           "--app-bar-height": showTopBar ? `${topBarHeight}px` : "0px", py: focused ? 2 : { xs: 4, sm: 6 },
+          "&:has([data-listening-theater])": { maxWidth: "none" },
           "header:has([data-timer-placement='rail'] [role='timer']) + &": {
             pl: { xs: `${timerRailWidth.xs + 8}px`, sm: `${timerRailWidth.sm + 16}px` },
           },

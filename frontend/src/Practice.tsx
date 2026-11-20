@@ -16,6 +16,7 @@ type Module = Skill;
 type Question = {
   type?: string; prompt: string; options: string[]; word_limit?: number;
   answers?: string[]; explanation?: string; evidence?: string;
+  assessment?: { distractor_analysis: { option_text: string; flaw: string }[] };
 };
 
 function readingOptions(question: Question, shuffleSeed?: string) {
@@ -47,16 +48,26 @@ type Criterion = { band: number; feedback: string; quote: string };
 type WritingTask = {
   title: string; task?: number | "full"; prompt?: string; table?: string[][]; chart?: WritingChart;
   mode?: "exam" | "learning"; category?: string; visual_kind?: WritingVisualKind; process?: string[];
+  comparison_chart?: WritingChart;
+  reference_analysis?: {
+    sample_response: string; key_features: string[]; important_comparisons: string[]; common_errors: string[];
+  };
 };
 type VocabularyHint = { term: string; meaning: string; phrase: string };
+const writingExampleLabels = {
+  opening_paraphrase: "Opening paraphrase", overview: "Overview", comparison: "Comparison",
+  argument: "Argument", supporting_detail: "Supporting detail", qualification: "Qualification", sentence: "Example sentence",
+};
+type RevisionExample = { type: keyof typeof writingExampleLabels; text: string };
 type RevisionPlan = {
   plan: string[]; develop: string[]; check: string[];
-  example?: { type: "opening_paraphrase" | "sentence"; text: string } | null;
+  examples?: RevisionExample[];
+  example?: RevisionExample | null;
 };
 type WritingFeedback = { band?: number; criteria?: Record<string, Criterion>; unanswered?: boolean; revision_plan?: RevisionPlan };
-type ReadingBand = { band?: number | null; band_estimated?: boolean; band_upper_bound?: number };
+type PracticeBand = { band?: number | null; band_estimated?: boolean; band_upper_bound?: number };
 
-function ReadingBandBadge({ grade }: { grade: ReadingBand }) {
+function PracticeBandBadge({ grade }: { grade: PracticeBand }) {
   if (grade.band != null) {
     return <BandScore band={grade.band} label={grade.band_estimated ? `Estimated band ${grade.band.toFixed(1)}` : undefined} />;
   }
@@ -115,13 +126,13 @@ type Attempt = {
     }[];
   };
   draft: Partial<Work>;
-  result: null | WritingFeedback & ReadingBand & {
+  result: null | WritingFeedback & PracticeBand & {
     kind: string; score?: number; maximum?: number; job_id?: string;
     items?: { status: "correct" | "incorrect" | "unanswered"; number: number; answer?: string; accepted?: string[] }[];
     tasks?: WritingFeedback[];
   };
 };
-type HistoryItem = ReadingBand & {
+type HistoryItem = PracticeBand & {
   id: string; module: Module; task?: number | "full"; title: string;
   mode: "exam" | "learning";
   started_at: string | null; paused_at: string | null; submitted_at: string | null; deadline: string;
@@ -141,7 +152,7 @@ async function api<T>(path: string, method = "GET", data?: unknown): Promise<T> 
   return response.json();
 }
 
-type SimulationSection = ReadingBand & { id: string; module: Module; submitted: boolean; score: number | null; band: number | null };
+type SimulationSection = PracticeBand & { id: string; module: Module; submitted: boolean; score: number | null; band: number | null };
 type SavedMock = { id: string; title: string; topic: string | null; first_passage: string | null; date: string; completed: boolean; source_name: string };
 type ReadingChoices = {
   groups: { name: string; topics: { id: string; label: string }[] }[];
@@ -367,11 +378,11 @@ export function Practice({ view, sessionId, navigate, saveAndGoHome, timerSlot }
           {simulation.data.items.map(item => <Card variant="outlined" key={item.id}><CardContent>
             <Stack direction="row" spacing={2} sx={{ alignItems: "center", justifyContent: "space-between" }}>
               <Chip size="small" color={item.module} label={skillLabels[item.module]} />
-              {item.module === "reading" && item.score !== null ? <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
-                <Chip size="small" color="reading" label={`${item.score}/40`} />
-                <ReadingBandBadge grade={item} />
+              {item.score !== null ? <Stack direction="row" spacing={1} useFlexGap sx={{ flexWrap: "wrap" }}>
+                <Chip size="small" color={item.module} label={item.module === "listening" ? `${item.score}/40 · Self-scored` : `${item.score}/40`} />
+                <PracticeBandBadge grade={item} />
               </Stack> : item.band !== null ? <BandScore band={item.band} /> :
-                <Typography>{item.score !== null ? `${item.score}/40` : item.submitted ? "Score pending" : "In progress"}</Typography>}
+                <Typography>{item.submitted ? "Score pending" : "In progress"}</Typography>}
               <Button color={item.module} href={`/sessions/${item.id}`}>{item.submitted ? "Review" : "Continue"}</Button>
             </Stack>
           </CardContent></Card>)}
@@ -691,9 +702,10 @@ function HistorySection({ skill, items, onDelete }: {
             <Typography sx={{ fontWeight: 600 }}>{item.title}</Typography>
             <Chip color={item.module} variant="outlined" size="small" label={skillLabels[item.module]} />
             {item.mode === "learning" && <Chip size="small" variant="outlined" label="Learning" />}
-            {item.module === "reading" && <ReadingBandBadge grade={item} />}
-            {item.module !== "reading" && item.band !== null
-              ? <BandScore band={item.band} label={`Estimated band ${item.band.toFixed(1)}`} /> : grade &&
+            {item.module === "writing" && item.band !== null
+              ? <BandScore band={item.band} label={`Estimated band ${item.band.toFixed(1)}`} />
+              : <PracticeBandBadge grade={item} />}
+            {grade &&
               <Chip color={item.module} size="small" label={item.module === "listening" ? `${grade} · Self-scored` : grade} />}
           </Stack>
           {dates.map(date => date && <Typography key={date[0]} variant="body2" color="text.secondary">
@@ -791,7 +803,11 @@ function Trend({ skill, title, maximum, items, value, action }: {
   </CardContent></Card>;
 }
 
-function RevisionSuggestions({ assessment, previous = false }: { assessment: WritingFeedback; previous?: boolean }) {
+function RevisionSuggestions({ assessment, addSentence, draft = "", saving = false }: {
+  assessment: WritingFeedback; addSentence?: (sentence: string) => void; draft?: string; saving?: boolean;
+}) {
+  const plan = assessment.revision_plan;
+  const examples = plan?.examples ?? (plan?.example ? [plan.example] : []);
   const items: [string, string[]][] = assessment.revision_plan ? [
     ["Plan your response", assessment.revision_plan.plan.slice(0, 1)],
     ["What to develop", assessment.revision_plan.develop.slice(0, 1)],
@@ -800,12 +816,12 @@ function RevisionSuggestions({ assessment, previous = false }: { assessment: Wri
     ["Plan your response", [assessment.criteria?.task?.feedback, assessment.criteria?.coherence?.feedback].filter((item): item is string => !!item)],
     ["Before you submit", [assessment.criteria?.vocabulary?.feedback, assessment.criteria?.grammar?.feedback].filter((item): item is string => !!item)],
   ];
-  if (!items.some(([, entries]) => entries.length)) return null;
+  if (!examples.length && !items.some(([, entries]) => entries.length)) return null;
   return <Card variant="outlined" sx={{ bgcolor: "writing.light" }}><CardContent>
     <Typography component="h3" variant="h6" sx={{ color: "writing.dark" }}>
-      {previous ? "Rewrite plan from your last attempt" : "Suggested rewrite plan"}
+      {addSentence ? "Rewrite plan from your last attempt" : "Suggested rewrite plan"}
     </Typography>
-    {assessment.revision_plan && "example" in assessment.revision_plan && <Typography variant="body2" color="text.secondary">
+    {examples.length > 0 && <Typography variant="body2" color="text.secondary">
       Three improvements to work toward Band 8.0+
     </Typography>}
     <Stack spacing={1.25} sx={{ mt: 1 }}>
@@ -817,12 +833,19 @@ function RevisionSuggestions({ assessment, previous = false }: { assessment: Wri
           </Box>
         </Box>
       ))}
-      {assessment.revision_plan?.example && <Box sx={{ borderLeft: "3px solid", borderColor: "writing.main", pl: 1.5 }}>
-        <Typography variant="body2" sx={{ fontWeight: 600 }}>
-          {assessment.revision_plan.example.type === "opening_paraphrase" ? "Example opening paraphrase" : "Example sentence"}
-        </Typography>
-        <Typography>{assessment.revision_plan.example.text}</Typography>
-      </Box>}
+      {examples.length > 0 && <Stack spacing={1.25} component="section" aria-label="Example sentences">
+        <Typography component="h4" sx={{ fontWeight: 600 }}>Example sentences</Typography>
+        {examples.map(example => {
+          const added = draft.includes(example.text);
+          return <Box key={example.text} sx={{ borderLeft: "3px solid", borderColor: "writing.main", pl: 1.5 }}>
+            <Typography variant="body2" sx={{ fontWeight: 600 }}>{writingExampleLabels[example.type]}</Typography>
+            <Typography>{example.text}</Typography>
+            {addSentence && <Button size="small" color="writing" disabled={added || saving} sx={{ mt: 0.5 }}
+              aria-label={added ? undefined : "Add " + writingExampleLabels[example.type].toLowerCase() + " to draft"}
+              onClick={() => addSentence(example.text)}>{added ? "Added to draft" : "Add to draft"}</Button>}
+          </Box>;
+        })}
+      </Stack>}
     </Stack>
   </CardContent></Card>;
 }
@@ -847,6 +870,8 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
   const [submitting, setSubmitting] = useState(false);
   const [readingSize, setReadingSize] = useState(1);
   const [editorRows, setEditorRows] = useState(14);
+  const [listeningTheater, setListeningTheater] = useState(false);
+  const essayEditor = useRef<HTMLTextAreaElement>(null);
   const [hints, setHints] = useState<Partial<Record<number, VocabularyHint[]>>>({});
   const [hintRequest, setHintRequest] = useState<number>();
   const [hintError, setHintError] = useState<{ task: number; message: string }>();
@@ -966,6 +991,21 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
   const hintTask = typeof prompt.task === "number" ? prompt.task : undefined;
   const simulation = attempt.content.simulation_id;
 
+  function addExampleSentence(sentence: string) {
+    setWork(current => {
+      const draft = current[essayField];
+      if (draft.includes(sentence)) return current;
+      return { ...current, [essayField]: draft.trimEnd() ? draft.trimEnd() + "\n\n" + sentence : sentence };
+    });
+    window.requestAnimationFrame(() => {
+      const editor = essayEditor.current;
+      if (editor) {
+        editor.focus();
+        editor.setSelectionRange(editor.value.length, editor.value.length);
+      }
+    });
+  }
+
   async function requestHints(task: number) {
     setHintError(undefined);
     setHintRequest(task);
@@ -1029,18 +1069,31 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
           attempt.module === "reading" ? "Continue to Writing" : "View simulation results"}
       </Button>}
     {!paused && attempt.module === "listening" && <>
-      <Box sx={{ display: "grid", gap: 3, gridTemplateColumns: { md: "repeat(2, minmax(0, 1fr))" }, alignItems: "start" }}>
-        <Card variant="outlined" sx={{ position: { md: "sticky" }, top: "calc(var(--app-bar-height, 0px) + 16px)", overflow: "hidden" }}>
+      <Button size="small" color="listening" variant="outlined" aria-pressed={listeningTheater}
+        sx={{ alignSelf: "start" }} onClick={() => setListeningTheater(value => !value)}>Theater mode</Button>
+      <Box data-listening-theater={listeningTheater ? "" : undefined} sx={{
+        display: "grid", gap: 3, gridTemplateColumns: {
+          xs: "minmax(0, 1fr)", md: listeningTheater ? "minmax(0, 1fr)" : "repeat(2, minmax(0, 1fr))",
+        }, alignItems: "start",
+      }}>
+        <Card variant="outlined" sx={{ position: { md: listeningTheater ? "static" : "sticky" },
+          top: "calc(var(--app-bar-height, 0px) + 16px)", overflow: "hidden" }}>
           <Box component="iframe" title="Listening test video"
             src={`https://www.youtube.com/embed/${attempt.content.video_id}`}
             allow="encrypted-media; picture-in-picture; fullscreen" allowFullScreen
             referrerPolicy="strict-origin-when-cross-origin"
-            sx={{ display: "block", width: "100%", aspectRatio: "16 / 9", border: 0, minHeight: 200 }} />
+            sx={{ display: "block", width: "100%", aspectRatio: "16 / 9", border: 0, minHeight: 200,
+              maxHeight: listeningTheater ? "calc(100dvh - var(--app-bar-height, 0px) - 24px)" : undefined }} />
         </Card>
-        <Stack spacing={2}>
+        <Stack spacing={2} sx={listeningTheater ? { width: "100%", maxWidth: 760, mx: "auto" } : undefined}>
           {!finished ? <Typography variant="h6" component="h3">Your answers</Typography> :
             attempt.result?.kind === "listening_self_scored" ?
-              <Alert severity="info">Self-scored Listening result {attempt.result.score}/40</Alert> :
+              <Alert severity="info">
+                <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
+                  <Typography variant="body2">Self-scored Listening result {attempt.result.score}/40</Typography>
+                  <PracticeBandBadge grade={attempt.result} />
+                </Stack>
+              </Alert> :
               <Box>
                 <Typography variant="h6" component="h3">Mark your answers</Typography>
                 <Typography variant="body2" color="text.secondary">
@@ -1086,7 +1139,7 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
     {attempt.result?.kind === "reading_raw" && <Alert severity="info">
       <Stack direction="row" spacing={1} useFlexGap sx={{ alignItems: "center", flexWrap: "wrap" }}>
         <Typography variant="body2">Reading score {attempt.result.score}/{attempt.result.maximum}</Typography>
-        <ReadingBandBadge grade={attempt.result} />
+        <PracticeBandBadge grade={attempt.result} />
       </Stack>
     </Alert>}
     {!paused && passage && <>
@@ -1155,6 +1208,14 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
                 <Typography>Accepted: {question.answers?.map(answerLabel).join(" / ")}</Typography>
                 <Typography>{question.explanation}</Typography>
                 {question.evidence && <Typography component="blockquote" sx={{ mx: 0 }}>{question.evidence}</Typography>}
+                {!!question.assessment?.distractor_analysis.length && <Box component="details" sx={{ mt: 1 }}>
+                  <Typography component="summary" variant="body2" sx={{ cursor: "pointer" }}>Why the other choices miss</Typography>
+                  <Box component="ul" sx={{ pl: 2.5 }}>
+                    {question.assessment.distractor_analysis.map(item => <li key={item.option_text}>
+                      <strong>{item.option_text}</strong> {item.flaw}
+                    </li>)}
+                  </Box>
+                </Box>}
               </Alert> : <TextField fullWidth sx={{ mt: 2 }} size="small" label={`Answer ${number}`}
                 helperText={!group && question.word_limit ? `Maximum ${question.word_limit} words` : undefined}
                 select={options.length > 0} value={work.answers[number] ?? ""}
@@ -1179,8 +1240,9 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
         <Typography variant="h6" component="h3">{prompt.title}</Typography>
       </>}
       {prompt.category && <Typography variant="body2" color="text.secondary">{prompt.category}</Typography>}
-      <Typography>{prompt.prompt}</Typography>
+      <Typography sx={{ whiteSpace: "pre-line" }}>{prompt.prompt}</Typography>
       {prompt.chart && <TaskChart chart={prompt.chart} kind={prompt.visual_kind} />}
+      {prompt.comparison_chart && <TaskChart chart={prompt.comparison_chart} kind="line" />}
       {prompt.table && <Stack spacing={0.75}>
         {prompt.visual_kind === "bar_table" && <Typography variant="subtitle1" sx={{ fontWeight: 600 }}>
           Share of the total by group (%)
@@ -1190,7 +1252,8 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
         <WritingDataTable rows={prompt.table} />
       </Stack>}
       {prompt.process && <WritingProcess title={prompt.title} stages={prompt.process} />}
-      {!finished && previousAssessment && <RevisionSuggestions assessment={previousAssessment} previous />}
+      {!finished && previousAssessment &&
+        <RevisionSuggestions assessment={previousAssessment} addSentence={addExampleSentence} draft={work[essayField]} saving={submitting} />}
       {finished ? <Card variant="outlined"><CardContent>
         <Typography variant="h6">Your submission</Typography>
         <Typography sx={{ whiteSpace: "pre-wrap" }}>{attempt.draft[essayField] || "No answer submitted."}</Typography>
@@ -1201,7 +1264,7 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
         </TextField>
         <TextField label={fullWriting ? `Your Task ${writingTask + 1} response` : "Your response"} multiline minRows={editorRows}
           value={work[essayField]} helperText={`${work[essayField].trim().match(/\S+/g)?.length ?? 0} words`}
-          onChange={event => setWork({ ...work, [essayField]: event.target.value })} />
+          inputRef={essayEditor} onChange={event => setWork({ ...work, [essayField]: event.target.value })} />
         {learning && hintTask !== undefined && (
           <Stack spacing={1.5} sx={{ alignItems: "flex-start" }}>
             <Button color="writing" variant="outlined" disabled={hintRequest !== undefined}
@@ -1227,6 +1290,24 @@ function Session({ attempt, onChange, onRevise, onHome, saveAndGoHome, startingR
       </Alert>}
       {assessment?.unanswered && <Alert severity="warning">This task was left unanswered.</Alert>}
       {finished && assessment && <RevisionSuggestions assessment={assessment} />}
+      {finished && prompt.reference_analysis && <Card variant="outlined"><CardContent component="details">
+        <Typography component="summary" variant="subtitle1" sx={{ fontWeight: 600, cursor: "pointer" }}>
+          Sample response and chart analysis
+        </Typography>
+        <Stack spacing={1.5} sx={{ mt: 1.5 }}>
+          <Typography sx={{ whiteSpace: "pre-wrap" }}>{prompt.reference_analysis.sample_response}</Typography>
+          {([
+            ["Main features", prompt.reference_analysis.key_features],
+            ["Important comparisons", prompt.reference_analysis.important_comparisons],
+            ["Common mistakes", prompt.reference_analysis.common_errors],
+          ] as const).map(([label, entries]) => <Box key={label}>
+            <Typography component="h4" sx={{ fontWeight: 600 }}>{label}</Typography>
+            <Box component="ul" sx={{ pl: 2.5, my: 0.5 }}>
+              {entries.map(entry => <li key={entry}>{entry}</li>)}
+            </Box>
+          </Box>)}
+        </Stack>
+      </CardContent></Card>}
       {assessment?.criteria && !assessment.unanswered && <>
         {assessment.band !== undefined && <Box><BandScore band={assessment.band}
           label={`${fullWriting ? `Task ${writingTask + 1}` : "Writing"} band ${assessment.band.toFixed(1)} · Unofficial`} /></Box>}
